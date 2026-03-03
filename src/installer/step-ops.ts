@@ -36,7 +36,9 @@ export function parseOutputKeyValues(output: string): Record<string, string> {
   }
 
   for (const line of lines) {
-    const match = line.match(/^([A-Z_]+):\s*(.*)$/);
+    // Match KEY: or Key: or key: — normalize to lowercase for context storage.
+    // ALL_CAPS convention is preferred but LLMs sometimes output mixed case.
+    const match = line.match(/^([A-Za-z_]+):\s*(.*)$/);
     if (match) {
       // New KEY: line found — flush previous key
       commitPending();
@@ -502,6 +504,12 @@ export function claimStep(agentId: string): ClaimResult {
          WHERE prev.run_id = s.run_id
            AND prev.step_index < s.step_index
            AND prev.status NOT IN ('done', 'skipped')
+           -- verify_each: allow verify step to be claimed when its owning loop step is running
+           AND NOT (
+             prev.type = 'loop'
+             AND prev.status = 'running'
+             AND json_extract(prev.loop_config, '$.verifyStep') = s.step_id
+           )
        )
     ORDER BY s.step_index ASC, s.step_id ASC
      LIMIT 1`

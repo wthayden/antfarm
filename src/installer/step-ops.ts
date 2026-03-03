@@ -85,10 +85,12 @@ function getWorkflowId(runId: string): string | undefined {
  * Resolve {{key}} placeholders in a template against a context object.
  */
 export function resolveTemplate(template: string, context: Record<string, string>): string {
-  return template.replace(/\{\{(\w+(?:\.\w+)*)\}\}/g, (_match, key: string) => {
+  // Supports {{key}} and {{key|default}} syntax
+  return template.replace(/\{\{(\w+(?:\.\w+)*)(?:\|([^}]*))?\}\}/g, (_match, key: string, defaultValue?: string) => {
     if (key in context) return context[key];
     const lower = key.toLowerCase();
     if (lower in context) return context[lower];
+    if (defaultValue !== undefined) return defaultValue;
     return `[missing: ${key}]`;
   });
 }
@@ -99,7 +101,9 @@ export function resolveTemplate(template: string, context: Record<string, string
 function findMissingTemplateKeys(template: string, context: Record<string, string>): string[] {
   const missing: string[] = [];
   const seen = new Set<string>();
-  template.replace(/\{\{(\w+(?:\.\w+)*)\}\}/g, (_match, key: string) => {
+  // Supports {{key}} and {{key|default}} — keys with defaults are never missing
+  template.replace(/\{\{(\w+(?:\.\w+)*)(?:\|([^}]*))?\}\}/g, (_match, key: string, defaultValue?: string) => {
+    if (defaultValue !== undefined) return ""; // has default, skip
     const lower = key.toLowerCase();
     const hasExact = Object.prototype.hasOwnProperty.call(context, key);
     const hasLower = Object.prototype.hasOwnProperty.call(context, lower);

@@ -209,7 +209,7 @@ steps:
       BRANCH: {{branch}}
       TEST_CMD: {{test_cmd}}
       CHANGES: {{changes}}
-      REGRESSION_TEST: {{regression_test}}
+      REGRESSION_TEST: {{regression_test|N/A — not applicable}}
       ROOT_CAUSE: {{root_cause}}
       PROBLEM_STATEMENT: {{problem_statement}}
 
@@ -258,7 +258,7 @@ steps:
       SEVERITY: {{severity}}
       ROOT_CAUSE: {{root_cause}}
       CHANGES: {{changes}}
-      REGRESSION_TEST: {{regression_test}}
+      REGRESSION_TEST: {{regression_test|N/A — not applicable}}
       VERIFIED: {{verified}}
 
       PR title format: fix: brief description of what was fixed
@@ -277,7 +277,7 @@ steps:
       {{changes}}
 
       ## Regression Test
-      {{regression_test}}
+      {{regression_test|N/A — not applicable}}
 
       ## Verification
       {{verified}}

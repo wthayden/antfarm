@@ -684,7 +684,7 @@ export function claimStep(agentId: string): ClaimResult {
 /**
  * Complete a step: save output, merge context, advance pipeline.
  */
-export function completeStep(stepId: string, output: string): { advanced: boolean; runCompleted: boolean } {
+export async function completeStep(stepId: string, output: string): Promise<{ advanced: boolean; runCompleted: boolean }> {
   const db = getDb();
 
   const step = db.prepare(
@@ -769,6 +769,58 @@ export function completeStep(stepId: string, output: string): { advanced: boolea
     if (lc.verifyEach && lc.verifyStep === step.step_id) {
       return handleVerifyEachCompletion(step, loopStepRow.id, output, context);
     }
+  }
+
+  // Single step: check for retry signal before marking done
+  const statusValue = context["status"]?.toLowerCase();
+  if (statusValue === "retry") {
+    // Agent signaled retry — look up on_fail policy to find retry_step
+    const policy = await getOnFailPolicy(step.run_id, step.step_id);
+    if (policy?.retry_step) {
+      // Find the step to retry and reset it to pending
+      const retryTarget = db.prepare(
+        "SELECT id FROM steps WHERE run_id = ? AND step_id = ? LIMIT 1"
+      ).get(step.run_id, policy.retry_step) as { id: string } | undefined;
+
+      if (retryTarget) {
+        const retryCount = (db.prepare(
+          "SELECT retry_count FROM steps WHERE id = ?"
+        ).get(retryTarget.id) as { retry_count: number })?.retry_count ?? 0;
+        const maxRetries = policy.max_retries ?? 2;
+
+        if (retryCount >= maxRetries) {
+          // Retries exhausted — fail
+          db.prepare("UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?").run(output, stepId);
+          db.prepare("UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(step.run_id);
+          const wfId = getWorkflowId(step.run_id);
+          emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail: "Retry exhausted after verify rejection" });
+          emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "Retry exhausted after verify rejection" });
+          scheduleRunCronTeardown(step.run_id);
+          await notifyFailureExhausted(step.run_id, step.step_id, context["issues"] ?? output);
+          return { advanced: false, runCompleted: false };
+        }
+
+        // Store verify feedback for the retry step
+        context["verify_feedback"] = context["issues"] ?? output;
+        db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
+
+        // Reset verify step to waiting, retry target to pending
+        db.prepare("UPDATE steps SET status = 'waiting', output = ?, updated_at = datetime('now') WHERE id = ?").run(output, stepId);
+        db.prepare("UPDATE steps SET status = 'pending', retry_count = retry_count + 1, updated_at = datetime('now') WHERE id = ?").run(retryTarget.id);
+        const wfId = getWorkflowId(step.run_id);
+        emitEvent({ ts: new Date().toISOString(), event: "step.retry", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail: context["issues"] ?? "Verify requested retry" });
+        logger.info(`Verify step ${step.step_id} requested retry of ${policy.retry_step}`, { runId: step.run_id });
+        return { advanced: false, runCompleted: false };
+      }
+    }
+    // No retry_step configured — treat retry as failure
+    db.prepare("UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?").run(output, stepId);
+    db.prepare("UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(step.run_id);
+    const wfId = getWorkflowId(step.run_id);
+    emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail: "STATUS: retry but no retry_step configured" });
+    emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "STATUS: retry but no retry_step configured" });
+    scheduleRunCronTeardown(step.run_id);
+    return { advanced: false, runCompleted: false };
   }
 
   // Single step: mark done and advance

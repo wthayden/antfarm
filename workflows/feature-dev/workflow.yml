@@ -10,7 +10,7 @@ description: |
   Then integration/E2E testing, PR creation, and code review.
 
 polling:
-  model: default
+  model: anthropic/claude-sonnet-4-20250514
   timeoutSeconds: 120
 
 agents:
@@ -126,7 +126,7 @@ steps:
 
       Instructions:
       1. cd into the repo
-      2. Create the feature branch (git checkout -b {{branch}})
+      2. Create a git worktree: git worktree add {{repo}}-{{branch}} -b {{branch}} main (if branch exists: git worktree add {{repo}}-{{branch}} {{branch}}). All work happens in the worktree dir, NOT the original repo. Copy .env if it exists. Run npm install. Include WORKTREE_DIR in output.
       3. Read package.json, CI config, test config to understand the build/test setup
       4. Ensure .gitignore exists — if missing, create one appropriate for the detected stack (must include .env, node_modules/, *.key, *.pem at minimum)
       5. Run the build to establish a baseline

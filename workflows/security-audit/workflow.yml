@@ -9,7 +9,7 @@ description: |
   Verifier confirms each fix. Tester runs final integration validation. PR agent creates the pull request.
 
 polling:
-  model: default
+  model: anthropic/claude-sonnet-4-20250514
   timeoutSeconds: 120
 
 agents:
@@ -179,10 +179,19 @@ steps:
 
       Instructions:
       1. cd into the repo
-      2. Create the security branch (git checkout -b {{branch}} from main)
-      3. Read package.json, CI config, test config to understand build/test setup
-      4. Run the build to establish a baseline
-      5. Run the tests to establish a baseline
+      2. Create a git worktree for this workflow:
+         - WORKTREE_DIR = {{repo}}-{{branch}} (e.g., /Users/moltbot/projects/boss-security-fixes)
+         - Run: git worktree add {{repo}}-{{branch}} -b {{branch}} main
+         - If the branch already exists: git worktree add {{repo}}-{{branch}} {{branch}}
+         - All subsequent work happens in the WORKTREE_DIR, NOT the original repo
+      3. cd into the worktree directory
+      4. If a .env file exists in the original repo, copy it: cp {{repo}}/.env {{repo}}-{{branch}}/.env
+      5. Run npm install (or equivalent) in the worktree
+      6. Read package.json, CI config, test config to understand build/test setup
+      7. Run the build to establish a baseline
+      8. Run the tests to establish a baseline
+      
+      IMPORTANT: Include WORKTREE_DIR in your output so subsequent steps know where to work.
 
       Reply with:
       STATUS: done

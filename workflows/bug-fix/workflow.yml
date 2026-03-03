@@ -9,7 +9,7 @@ description: |
   PR agent creates the pull request.
 
 polling:
-  model: default
+  model: anthropic/claude-sonnet-4-20250514
   timeoutSeconds: 120
 
 agents:
@@ -147,7 +147,7 @@ steps:
 
       Instructions:
       1. cd into the repo
-      2. Create the bugfix branch (git checkout -b {{branch}} from main)
+      2. Create a git worktree: git worktree add {{repo}}-{{branch}} -b {{branch}} main (if branch exists: git worktree add {{repo}}-{{branch}} {{branch}}). All work happens in the worktree dir, NOT the original repo. Copy .env if it exists. Run npm install. Include WORKTREE_DIR in output.
       3. Read package.json, CI config, test config to understand build/test setup
       4. Ensure .gitignore exists — if missing, create one appropriate for the detected stack (must include .env, node_modules/, *.key, *.pem at minimum)
       5. Run the build to establish a baseline
@@ -180,13 +180,10 @@ steps:
       FIX_APPROACH: {{fix_approach}}
       PROBLEM_STATEMENT: {{problem_statement}}
 
-      VERIFY FEEDBACK (if retrying):
-      {{verify_feedback}}
-
       Instructions:
       1. cd into the repo, checkout the branch
       2. Implement the fix based on the root cause and fix approach
-      3. Write a regression test that would have caught this bug
+      3. Write a regression test that would have caught this bug (if applicable — for refactors/removals, skip this)
       4. Run {{build_cmd}} to verify the build passes
       5. Run {{test_cmd}} to verify all tests pass
       6. Commit: fix: brief description of the fix
@@ -194,7 +191,7 @@ steps:
       Reply with:
       STATUS: done
       CHANGES: what was changed
-      REGRESSION_TEST: what test was added
+      REGRESSION_TEST: what test was added (or "N/A" if not applicable)
     expects: "STATUS: done"
     max_retries: 2
     on_fail:

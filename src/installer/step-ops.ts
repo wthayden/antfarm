@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import YAML from "yaml";
 import { execSync, execFileSync } from "node:child_process";
 import { teardownWorkflowCronsIfIdle } from "./agent-cron.js";
 import { emitEvent } from "./events.js";
@@ -13,7 +14,7 @@ import { getMaxRoleTimeoutSeconds } from "./install.js";
 import { loadWorkflowSpec } from "./workflow-spec.js";
 import { resolveWorkflowDir } from "./paths.js";
 import { isFrontendChange } from "../lib/frontend-detect.js";
-import type { WorkflowStepFailure } from "./types.js";
+import type { WorkflowSpec, WorkflowStepFailure } from "./types.js";
 
 /**
  * Parse KEY: value lines from step output with support for multi-line values.
@@ -263,7 +264,7 @@ function parseAndInsertStories(output: string, runId: string): void {
 
 // ── Abandoned Step Cleanup ──────────────────────────────────────────
 
-const ABANDONED_THRESHOLD_MS = (getMaxRoleTimeoutSeconds() + 5 * 60) * 1000; // max role timeout + 5 min buffer
+const DEFAULT_ABANDONED_TIMEOUT_MS = (getMaxRoleTimeoutSeconds() + 5 * 60) * 1000; // fallback for legacy rows
 const MAX_ABANDON_RESETS = 5; // abandoned steps get more chances than explicit failures
 
 /**
@@ -274,12 +275,12 @@ const MAX_ABANDON_RESETS = 5; // abandoned steps get more chances than explicit 
 export function cleanupAbandonedSteps(): void {
   const db = getDb();
   // Use numeric comparison so mixed timestamp formats don't break ordering.
-  const thresholdMs = ABANDONED_THRESHOLD_MS;
+  const defaultThresholdMs = DEFAULT_ABANDONED_TIMEOUT_MS;
 
   // Find running steps that haven't been updated recently
   const abandonedSteps = db.prepare(
-    "SELECT id, step_id, run_id, retry_count, max_retries, type, current_story_id, loop_config, abandoned_count FROM steps WHERE status = 'running' AND (julianday('now') - julianday(updated_at)) * 86400000 > ?"
-  ).all(thresholdMs) as { id: string; step_id: string; run_id: string; retry_count: number; max_retries: number; type: string; current_story_id: string | null; loop_config: string | null; abandoned_count: number }[];
+    "SELECT id, step_id, run_id, retry_count, max_retries, type, current_story_id, loop_config, abandoned_count, timeout_seconds FROM steps WHERE status = 'running' AND (julianday('now') - julianday(updated_at)) * 86400000 > COALESCE((timeout_seconds + 300) * 1000, ?)"
+  ).all(defaultThresholdMs) as { id: string; step_id: string; run_id: string; retry_count: number; max_retries: number; type: string; current_story_id: string | null; loop_config: string | null; abandoned_count: number; timeout_seconds: number | null }[];
 
   for (const step of abandonedSteps) {
     if (step.type === "loop" && !step.current_story_id && step.loop_config) {
@@ -353,7 +354,7 @@ export function cleanupAbandonedSteps(): void {
   // Don't increment retry_count for abandonment; only explicit failStep() counts against retries
   const abandonedStories = db.prepare(
     "SELECT id, retry_count, max_retries, run_id FROM stories WHERE status = 'running' AND (julianday('now') - julianday(updated_at)) * 86400000 > ?"
-  ).all(thresholdMs) as { id: string; retry_count: number; max_retries: number; run_id: string }[];
+  ).all(defaultThresholdMs) as { id: string; retry_count: number; max_retries: number; run_id: string }[];
 
   for (const story of abandonedStories) {
     // Simply reset to pending without incrementing retry_count
@@ -390,17 +391,191 @@ export function cleanupAbandonedSteps(): void {
  * Returns 'true' or 'false' as a string for template context.
  */
 export function computeHasFrontendChanges(repo: string, branch: string): string {
+  if (!branch || branch === "main") {
+    return "false";
+  }
+
   try {
     const output = execFileSync("git", ["diff", "--name-only", `main..${branch}`], {
       cwd: repo,
       encoding: "utf-8",
       timeout: 10_000,
+      stdio: ["ignore", "pipe", "ignore"],
     });
     const files = output.trim().split("\n").filter(f => f.length > 0);
     return isFrontendChange(files) ? "true" : "false";
   } catch {
     return "false";
   }
+}
+
+function getRepoCurrentBranch(repo: string): string | undefined {
+  try {
+    const branch = execFileSync("git", ["branch", "--show-current"], {
+      cwd: repo,
+      encoding: "utf-8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return branch || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function inferRepoCommands(repo: string): { buildCmd?: string; testCmd?: string } {
+  try {
+    const packageJsonPath = path.join(repo, "package.json");
+    const makefilePath = path.join(repo, "Makefile");
+    const cargoTomlPath = path.join(repo, "Cargo.toml");
+    const pyprojectPath = path.join(repo, "pyproject.toml");
+    const requirementsPath = path.join(repo, "requirements.txt");
+    const goModPath = path.join(repo, "go.mod");
+
+    if (fs.existsSync(packageJsonPath)) {
+      const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as {
+        scripts?: Record<string, string>;
+      };
+
+      const hasPnpm = fs.existsSync(path.join(repo, "pnpm-lock.yaml"));
+      const hasYarn = fs.existsSync(path.join(repo, "yarn.lock"));
+      const hasBun = fs.existsSync(path.join(repo, "bun.lockb")) || fs.existsSync(path.join(repo, "bun.lock"));
+      const runner = hasPnpm ? "pnpm" : hasYarn ? "yarn" : hasBun ? "bun" : "npm";
+
+      return {
+        buildCmd: pkg.scripts?.build ? (runner === "npm" ? "npm run build" : `${runner} build`) : undefined,
+        testCmd: pkg.scripts?.test ? (runner === "npm" ? "npm test" : `${runner} test`) : undefined,
+      };
+    }
+
+    if (fs.existsSync(makefilePath)) {
+      const makefile = fs.readFileSync(makefilePath, "utf-8");
+      return {
+        buildCmd: /^build\s*:/m.test(makefile) ? "make build" : undefined,
+        testCmd: /^test\s*:/m.test(makefile) ? "make test" : undefined,
+      };
+    }
+
+    if (fs.existsSync(cargoTomlPath)) {
+      return { buildCmd: "cargo build", testCmd: "cargo test" };
+    }
+
+    if (fs.existsSync(goModPath)) {
+      return { buildCmd: "go build ./...", testCmd: "go test ./..." };
+    }
+
+    if (fs.existsSync(pyprojectPath) || fs.existsSync(requirementsPath)) {
+      return { buildCmd: undefined, testCmd: "pytest" };
+    }
+
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+function backfillContextFromRepo(context: Record<string, string>): void {
+  const repo = context["repo"];
+  if (!repo) return;
+
+  const currentBranch = getRepoCurrentBranch(repo);
+  if (currentBranch) {
+    context["branch"] = currentBranch;
+  }
+
+  const inferred = inferRepoCommands(repo);
+  if (!context["build_cmd"] && inferred.buildCmd) {
+    context["build_cmd"] = inferred.buildCmd;
+  }
+  if (!context["test_cmd"] && inferred.testCmd) {
+    context["test_cmd"] = inferred.testCmd;
+  }
+}
+
+function findFutureRequiredKeys(runId: string, currentStepIndex: number, candidateKeys: string[]): string[] {
+  const db = getDb();
+  const laterSteps = db.prepare(
+    "SELECT input_template FROM steps WHERE run_id = ? AND step_index > ? ORDER BY step_index ASC"
+  ).all(runId, currentStepIndex) as { input_template: string }[];
+
+  const required = new Set<string>();
+  for (const step of laterSteps) {
+    for (const key of candidateKeys) {
+      if (step.input_template.includes(`{{${key}}}`)) {
+        required.add(key);
+      }
+    }
+  }
+  return [...required];
+}
+
+function handleInvalidCompletion(
+  step: { id: string; run_id: string; step_id: string; retry_count: number; max_retries: number },
+  context: Record<string, string>,
+  detail: string,
+): { advanced: boolean; runCompleted: boolean } {
+  const db = getDb();
+  const wfId = getWorkflowId(step.run_id);
+  const newRetryCount = step.retry_count + 1;
+
+  if (newRetryCount > step.max_retries) {
+    db.prepare(
+      "UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(detail, newRetryCount, step.id);
+    db.prepare(
+      "UPDATE runs SET status = 'failed', context = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(JSON.stringify(context), step.run_id);
+    emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail });
+    emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "Invalid step completion exhausted retries" });
+    scheduleRunCronTeardown(step.run_id);
+    return { advanced: false, runCompleted: false };
+  }
+
+  db.prepare(
+    "UPDATE steps SET status = 'pending', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(detail, newRetryCount, step.id);
+  db.prepare(
+    "UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(JSON.stringify(context), step.run_id);
+  emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail });
+  return { advanced: false, runCompleted: false };
+}
+
+function validateStepCompletion(
+  step: { run_id: string; step_id: string; step_index: number; expects?: string },
+  output: string,
+  mergedContext: Record<string, string>,
+  status: string | undefined,
+  allowsRetry: boolean,
+): string | null {
+  const normalizedStatus = status?.toLowerCase();
+
+  if (!normalizedStatus) {
+    return "Invalid step completion: missing STATUS line";
+  }
+
+  if (normalizedStatus !== "done" && !(normalizedStatus === "retry" && allowsRetry)) {
+    return `Invalid step completion: unsupported STATUS ${status}`;
+  }
+
+  if (step.expects && !output.includes(step.expects) && !(normalizedStatus === "retry" && allowsRetry)) {
+    return `Invalid step completion: output did not satisfy expects contract (${step.expects})`;
+  }
+
+  if (step.step_id === "setup") {
+    const branch = mergedContext["branch"]?.trim();
+    if (!branch || branch === "main" || branch === "master") {
+      return "Invalid setup completion: branch was not established on a non-main branch";
+    }
+
+    const futureKeys = findFutureRequiredKeys(step.run_id, step.step_index, ["build_cmd", "test_cmd"]);
+    const missingFutureKeys = futureKeys.filter((key) => !mergedContext[key]);
+    if (missingFutureKeys.length > 0) {
+      return `Invalid setup completion: missing required context for downstream steps (${missingFutureKeys.join(", ")})`;
+    }
+  }
+
+  return null;
 }
 
 function failStepWithMissingInputs(
@@ -471,6 +646,7 @@ interface ClaimResult {
   stepId?: string;
   runId?: string;
   resolvedInput?: string;
+  cwd?: string;
 }
 
 /**
@@ -520,6 +696,8 @@ export function claimStep(agentId: string): ClaimResult {
   // Get run context
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string } | undefined;
   const context: Record<string, string> = run ? JSON.parse(run.context) : {};
+
+  backfillContextFromRepo(context);
 
   // Always inject run_id so templates can use {{run_id}} (e.g. for scoped progress files)
   context["run_id"] = step.run_id;
@@ -636,7 +814,13 @@ export function claimStep(agentId: string): ClaimResult {
       db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
 
       const resolvedInput = resolveTemplate(step.input_template, context);
-      return { found: true, stepId: step.id, runId: step.run_id, resolvedInput };
+      return {
+        found: true,
+        stepId: step.id,
+        runId: step.run_id,
+        resolvedInput,
+        cwd: context["repo"] || context["cwd"],
+      };
     }
   }
 
@@ -655,6 +839,10 @@ export function claimStep(agentId: string): ClaimResult {
     context["progress"] = readProgressFile(step.run_id);
   }
 
+  if (!context["verify_feedback"]) {
+    context["verify_feedback"] = "";
+  }
+
   const missingKeys = findMissingTemplateKeys(step.input_template, context);
   if (missingKeys.length > 0) {
     failStepWithMissingInputs(step.id, step.step_id, step.run_id, missingKeys);
@@ -668,6 +856,7 @@ export function claimStep(agentId: string): ClaimResult {
     stepId: step.id,
     runId: step.run_id,
     resolvedInput,
+    cwd: context["repo"] || context["cwd"],
   };
 }
 
@@ -680,25 +869,95 @@ export function completeStep(stepId: string, output: string): { advanced: boolea
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id FROM steps WHERE id = ?"
-  ).get(stepId) as { id: string; run_id: string; step_id: string; step_index: number; type: string; loop_config: string | null; current_story_id: string | null } | undefined;
+    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, retry_count, max_retries, status, expects FROM steps WHERE id = ?"
+  ).get(stepId) as { id: string; run_id: string; step_id: string; step_index: number; type: string; loop_config: string | null; current_story_id: string | null; retry_count: number; max_retries: number; status: string; expects: string } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
 
-  // Guard: don't process completions for failed runs
+  if (step.status !== "running") {
+    logger.warn(`Ignoring late completion for non-running step: ${step.step_id} (${step.status})`, { runId: step.run_id, stepId: step.step_id });
+    return { advanced: false, runCompleted: false };
+  }
+
+  // Guard: don't process completions for failed/cancelled runs
   const runCheck = db.prepare("SELECT status FROM runs WHERE id = ?").get(step.run_id) as { status: string } | undefined;
-  if (runCheck?.status === "failed") {
+  if (runCheck?.status === "failed" || runCheck?.status === "cancelled") {
     return { advanced: false, runCompleted: false };
   }
 
   // Merge KEY: value lines into run context
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string };
-  const context: Record<string, string> = JSON.parse(run.context);
+  const baseContext: Record<string, string> = JSON.parse(run.context);
+  const context: Record<string, string> = { ...baseContext };
 
   // Parse KEY: value lines and merge into context
   const parsed = parseOutputKeyValues(output);
   for (const [key, value] of Object.entries(parsed)) {
     context[key] = value;
+  }
+
+  backfillContextFromRepo(context);
+
+  const status = parsed["status"]?.toLowerCase();
+  const onFailPolicy = status === "retry" ? getOnFailPolicySync(step.run_id, step.step_id) : null;
+  const validationError = validateStepCompletion(step, output, context, status, !!onFailPolicy?.retry_step);
+  if (validationError) {
+    return handleInvalidCompletion(step, baseContext, validationError);
+  }
+
+  if (status === "retry" && onFailPolicy?.retry_step) {
+    const issues = parsed["issues"] ?? output;
+    context["verify_feedback"] = issues;
+
+    const newRetryCount = step.retry_count + 1;
+    if (newRetryCount > step.max_retries) {
+      db.prepare(
+        "UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(output, newRetryCount, stepId);
+      db.prepare(
+        "UPDATE runs SET status = 'failed', context = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(JSON.stringify(context), step.run_id);
+      const wfId = getWorkflowId(step.run_id);
+      emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail: issues });
+      emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "Step retries exhausted" });
+      scheduleRunCronTeardown(step.run_id);
+      void notifyFailureExhausted(step.run_id, step.step_id, issues);
+      return { advanced: false, runCompleted: false };
+    }
+
+    const retryStep = db.prepare(
+      "SELECT id FROM steps WHERE run_id = ? AND step_id = ? LIMIT 1"
+    ).get(step.run_id, onFailPolicy.retry_step) as { id: string } | undefined;
+
+    if (!retryStep) {
+      const wfId = getWorkflowId(step.run_id);
+      const detail = `Invalid workflow retry target: ${onFailPolicy.retry_step}`;
+      db.prepare(
+        "UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(detail, newRetryCount, stepId);
+      db.prepare(
+        "UPDATE runs SET status = 'failed', context = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(JSON.stringify(context), step.run_id);
+      emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail });
+      emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail });
+      scheduleRunCronTeardown(step.run_id);
+      return { advanced: false, runCompleted: false };
+    }
+
+    db.prepare(
+      "UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(JSON.stringify(context), step.run_id);
+    db.prepare(
+      "UPDATE steps SET status = 'waiting', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(output, newRetryCount, stepId);
+    if (retryStep) {
+      db.prepare(
+        "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
+      ).run(retryStep.id);
+    }
+
+    logger.info(`Step requested retry: ${step.step_id} -> ${onFailPolicy.retry_step}`, { runId: step.run_id, stepId: step.step_id });
+    return { advanced: false, runCompleted: false };
   }
 
   db.prepare(
@@ -792,6 +1051,9 @@ function handleVerifyEachCompletion(
 
   if (status !== "retry") {
     // Verify passed
+    const verifiedValue = context["verified"] ?? output;
+    const verifiedKey = getStepOutputKeyName(verifyStep.run_id, verifyStep.step_id, "verified");
+    context[verifiedKey] = verifiedValue;
     emitEvent({ ts: new Date().toISOString(), event: "story.verified", runId: verifyStep.run_id, workflowId: getWorkflowId(verifyStep.run_id), stepId: verifyStep.step_id });
   }
 
@@ -968,6 +1230,56 @@ function resolveEscalationTarget(policy: WorkflowStepFailure | null): string | n
   return null;
 }
 
+function getWorkflowSpecSync(workflowId: string): WorkflowSpec | null {
+  try {
+    const workflowDir = resolveWorkflowDir(workflowId);
+    const filePath = path.join(workflowDir, "workflow.yml");
+    const raw = fs.readFileSync(filePath, "utf-8");
+    return YAML.parse(raw) as WorkflowSpec;
+  } catch {
+    return null;
+  }
+}
+
+function getOnFailPolicySync(runId: string, stepId: string): WorkflowStepFailure | null {
+  try {
+    const db = getDb();
+    const run = db.prepare("SELECT workflow_id FROM runs WHERE id = ?").get(runId) as { workflow_id: string } | undefined;
+    if (!run) return null;
+
+    const workflow = getWorkflowSpecSync(run.workflow_id);
+    const step = workflow?.steps?.find((s) => s.id === stepId);
+    return step?.on_fail ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function getStepOutputKeyName(runId: string, stepId: string, preferredKey: string): string {
+  try {
+    const db = getDb();
+    const run = db.prepare("SELECT workflow_id FROM runs WHERE id = ?").get(runId) as { workflow_id: string } | undefined;
+    if (!run) return preferredKey.toLowerCase();
+
+    const workflow = getWorkflowSpecSync(run.workflow_id);
+    const step = workflow?.steps?.find((s) => s.id === stepId);
+    const input = step?.input ?? "";
+    const placeholders = Array.from(input.matchAll(/\{\{(\w+(?:\.\w+)*)\}\}/g)).map((m) => m[1].toLowerCase());
+    const normalizedPreferred = preferredKey.toLowerCase();
+
+    if (placeholders.includes(normalizedPreferred)) return normalizedPreferred;
+
+    if (stepId === "verify") {
+      if (placeholders.includes("verified")) return "verified";
+      if (placeholders.includes("issues")) return "issues";
+    }
+
+    return normalizedPreferred;
+  } catch {
+    return preferredKey.toLowerCase();
+  }
+}
+
 async function getOnFailPolicy(runId: string, stepId: string): Promise<WorkflowStepFailure | null> {
   try {
     const db = getDb();
@@ -1036,7 +1348,7 @@ export async function failStep(stepId: string, error: string): Promise<{ retryin
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT run_id, step_id, retry_count, max_retries, type, current_story_id FROM steps WHERE id = ?"
+    "SELECT run_id, step_id, retry_count, max_retries, type, current_story_id, status FROM steps WHERE id = ?"
   ).get(stepId) as {
     run_id: string;
     step_id: string;
@@ -1044,9 +1356,15 @@ export async function failStep(stepId: string, error: string): Promise<{ retryin
     max_retries: number;
     type: string;
     current_story_id: string | null;
+    status: string;
   } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
+
+  if (step.status !== "running") {
+    logger.warn(`Ignoring late failure for non-running step: ${step.step_id} (${step.status})`, { runId: step.run_id, stepId: step.step_id });
+    return { retrying: false, runFailed: false };
+  }
 
   // T9: Loop step failure — per-story retry
   if (step.type === "loop" && step.current_story_id) {

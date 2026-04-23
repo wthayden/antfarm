@@ -26,7 +26,7 @@ describe("step contract validation", () => {
     tempRepos.length = 0;
   });
 
-  it("does not advance a step when completion omits STATUS", () => {
+  it("does not advance a step when completion omits STATUS", async () => {
     const db = getDb();
     const runId = randomUUID();
     const setupStepId = randomUUID();
@@ -50,7 +50,7 @@ describe("step contract validation", () => {
 
     testRunIds.push(runId);
 
-    const result = completeStep(setupStepId, "BUILD_CMD: npm run build\nTEST_CMD: npm test");
+    const result = await completeStep(setupStepId, "BUILD_CMD: npm run build\nTEST_CMD: npm test");
     assert.deepEqual(result, { advanced: false, runCompleted: false });
 
     const setup = db.prepare("SELECT status, retry_count, output FROM steps WHERE id = ?").get(setupStepId) as { status: string; retry_count: number; output: string };
@@ -64,7 +64,7 @@ describe("step contract validation", () => {
     assert.equal(run.status, "running");
   });
 
-  it("rejects missing STATUS even when prior run context already has status=done", () => {
+  it("rejects missing STATUS even when prior run context already has status=done", async () => {
     const db = getDb();
     const runId = randomUUID();
     const stepId = randomUUID();
@@ -88,7 +88,7 @@ describe("step contract validation", () => {
 
     testRunIds.push(runId);
 
-    const result = completeStep(stepId, "VERIFIED: current output but no status");
+    const result = await completeStep(stepId, "VERIFIED: current output but no status");
     assert.deepEqual(result, { advanced: false, runCompleted: false });
 
     const step = db.prepare("SELECT status, retry_count, output FROM steps WHERE id = ?").get(stepId) as { status: string; retry_count: number; output: string };
@@ -104,7 +104,7 @@ describe("step contract validation", () => {
     assert.equal(context.verified, "old value");
   });
 
-  it("fails closed when retry_step target is missing", () => {
+  it("fails closed when retry_step target is missing", async () => {
     const db = getDb();
     const runId = randomUUID();
     const stepId = randomUUID();
@@ -122,7 +122,7 @@ describe("step contract validation", () => {
 
     testRunIds.push(runId);
 
-    const result = completeStep(stepId, "STATUS: retry\nISSUES: not good");
+    const result = await completeStep(stepId, "STATUS: retry\nISSUES: not good");
     assert.deepEqual(result, { advanced: false, runCompleted: false });
 
     const step = db.prepare("SELECT status, retry_count, output FROM steps WHERE id = ?").get(stepId) as { status: string; retry_count: number; output: string };

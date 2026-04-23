@@ -16,7 +16,7 @@ describe("verify output context propagation", () => {
     testRunIds.length = 0;
   });
 
-  it("stores VERIFIED output in run context so downstream PR steps can resolve it", () => {
+  it("stores VERIFIED output in run context so downstream PR steps can resolve it", async () => {
     const db = getDb();
     const runId = randomUUID();
     const now = new Date().toISOString();
@@ -50,7 +50,7 @@ describe("verify output context propagation", () => {
 
     testRunIds.push(runId);
 
-    const result = completeStep(verifyStepId, [
+    const result = await completeStep(verifyStepId, [
       "STATUS: done",
       "VERIFIED: confirmed fix matches root cause and regression test fails without it",
     ].join("\n"));

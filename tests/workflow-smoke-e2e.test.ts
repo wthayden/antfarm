@@ -138,14 +138,14 @@ steps:
     assert.match(firstClaim.resolvedInput ?? "", /TASK: smoke e2e workflow/);
     assert.equal(fs.realpathSync(firstClaim.cwd!), fs.realpathSync(repoDir));
 
-    const firstComplete = completeStep(firstClaim.stepId!, "STATUS: done\nNOTE: smoke started");
+    const firstComplete = await completeStep(firstClaim.stepId!, "STATUS: done\nNOTE: smoke started");
     assert.deepEqual(firstComplete, { advanced: true, runCompleted: false });
 
     const secondClaim = claimStep(`${WORKFLOW_ID}_finisher`);
     assert.equal(secondClaim.found, true, "finisher step should be claimable after pipeline advance");
     assert.match(secondClaim.resolvedInput ?? "", /NOTE: smoke started/);
 
-    const secondComplete = completeStep(secondClaim.stepId!, "STATUS: done\nVERIFIED: smoke finished");
+    const secondComplete = await completeStep(secondClaim.stepId!, "STATUS: done\nVERIFIED: smoke finished");
     assert.deepEqual(secondComplete, { advanced: false, runCompleted: true });
 
     const status = getWorkflowStatus(run.id);

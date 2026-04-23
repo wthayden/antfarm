@@ -31,7 +31,7 @@ describe("workflow task contract guidance", () => {
   });
 
   it("smoke task keeps the no-build edge case explicit", () => {
-    const smokeTask = fs.readFileSync(path.join(ROOT, "tmp", "smoke-task.txt"), "utf8");
+    const smokeTask = fs.readFileSync(path.join(ROOT, "tests", "fixtures", "smoke-task.txt"), "utf8");
     assert.match(smokeTask, /build command passes if present/i);
   });
 });

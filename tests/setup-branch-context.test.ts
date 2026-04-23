@@ -26,7 +26,7 @@ describe("setup step branch context sync", () => {
     tempRepos.length = 0;
   });
 
-  it("captures the actual checked-out branch after setup completes", () => {
+  it("captures the actual checked-out branch after setup completes", async () => {
     const repo = mkdtempSync(path.join(tmpdir(), "antfarm-setup-branch-"));
     tempRepos.push(repo);
 
@@ -59,7 +59,7 @@ describe("setup step branch context sync", () => {
 
     testRunIds.push(runId);
 
-    const result = completeStep(setupStepId, [
+    const result = await completeStep(setupStepId, [
       "STATUS: done",
       "BUILD_CMD: npm run build",
       "TEST_CMD: npm test",
@@ -73,7 +73,7 @@ describe("setup step branch context sync", () => {
     assert.equal(context.branch, "bugfix/main");
   });
 
-  it("backfills build and test commands from package.json when setup output omits them", () => {
+  it("backfills build and test commands from package.json when setup output omits them", async () => {
     const repo = mkdtempSync(path.join(tmpdir(), "antfarm-setup-fallback-"));
     tempRepos.push(repo);
 
@@ -113,7 +113,7 @@ describe("setup step branch context sync", () => {
 
     testRunIds.push(runId);
 
-    const result = completeStep(setupStepId, "STATUS: done");
+    const result = await completeStep(setupStepId, "STATUS: done");
     assert.deepEqual(result, { advanced: true, runCompleted: false });
 
     const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string };

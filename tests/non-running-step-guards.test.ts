@@ -16,7 +16,7 @@ describe("non-running step guards", () => {
     testRunIds.length = 0;
   });
 
-  it("ignores duplicate completion on an already-done step", () => {
+  it("ignores duplicate completion on an already-done step", async () => {
     const db = getDb();
     const runId = randomUUID();
     const stepId = randomUUID();
@@ -46,7 +46,7 @@ describe("non-running step guards", () => {
 
     testRunIds.push(runId);
 
-    const first = completeStep(stepId, "STATUS: done\nBUILD_CMD: npm run build\nTEST_CMD: npm test");
+    const first = await completeStep(stepId, "STATUS: done\nBUILD_CMD: npm run build\nTEST_CMD: npm test");
     assert.deepEqual(first, { advanced: true, runCompleted: false });
 
     let fixStep = db.prepare("SELECT status FROM steps WHERE id = ?").get(nextStepId) as { status: string };
@@ -54,7 +54,7 @@ describe("non-running step guards", () => {
     assert.equal(fixStep.status, "pending");
     assert.equal(verifyStep.status, "waiting");
 
-    const duplicate = completeStep(stepId, "STATUS: done\nBUILD_CMD: npm run build\nTEST_CMD: npm test");
+    const duplicate = await completeStep(stepId, "STATUS: done\nBUILD_CMD: npm run build\nTEST_CMD: npm test");
     assert.deepEqual(duplicate, { advanced: false, runCompleted: false });
 
     fixStep = db.prepare("SELECT status FROM steps WHERE id = ?").get(nextStepId) as { status: string };

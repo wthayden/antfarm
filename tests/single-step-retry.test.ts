@@ -29,7 +29,7 @@ describe("single-step retry_step flow", () => {
     testRunIds.length = 0;
   });
 
-  it("routes STATUS: retry back to the configured retry_step instead of advancing", () => {
+  it("routes STATUS: retry back to the configured retry_step instead of advancing", async () => {
     const db = getDb();
     const runId = randomUUID();
     const now = new Date().toISOString();
@@ -70,7 +70,7 @@ describe("single-step retry_step flow", () => {
 
     testRunIds.push(runId);
 
-    const result = completeStep(verifyStepId, [
+    const result = await completeStep(verifyStepId, [
       'STATUS: retry',
       'ISSUES: verifier found a mismatch',
     ].join('\n'));

@@ -186,9 +186,6 @@ steps:
       FIX_APPROACH: {{fix_approach}}
       PROBLEM_STATEMENT: {{problem_statement}}
 
-      VERIFY FEEDBACK (if retrying):
-      {{verify_feedback}}
-
       Instructions:
       1. cd into the repo, checkout the branch
       2. Implement the fix based on the root cause and fix approach
@@ -200,7 +197,7 @@ steps:
       Reply with:
       STATUS: done
       CHANGES: what was changed
-      REGRESSION_TEST: what test was added
+      REGRESSION_TEST: what test was added (or "N/A" if not applicable)
     expects: "STATUS: done"
     max_retries: 2
     on_fail:
@@ -219,7 +216,7 @@ steps:
       BUILD_CMD: {{build_cmd}}
       TEST_CMD: {{test_cmd}}
       CHANGES: {{changes}}
-      REGRESSION_TEST: {{regression_test}}
+      REGRESSION_TEST: {{regression_test|N/A — not applicable}}
       ROOT_CAUSE: {{root_cause}}
       PROBLEM_STATEMENT: {{problem_statement}}
 
@@ -269,7 +266,7 @@ steps:
       SEVERITY: {{severity}}
       ROOT_CAUSE: {{root_cause}}
       CHANGES: {{changes}}
-      REGRESSION_TEST: {{regression_test}}
+      REGRESSION_TEST: {{regression_test|N/A — not applicable}}
       VERIFIED: {{verified}}
 
       PR title format: fix: brief description of what was fixed
@@ -288,7 +285,7 @@ steps:
       {{changes}}
 
       ## Regression Test
-      {{regression_test}}
+      {{regression_test|N/A — not applicable}}
 
       ## Verification
       {{verified}}
